@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Auto Split/Steal — Q-Learning (2×3 Board)</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#101936; --ink:#e8eefc; --muted:#9fb3ff;
+    --line:#1a2448;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:15px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  #wrap{min-height:100vh;display:grid;grid-template-columns:minmax(260px,340px) 1fr minmax(260px,340px);gap:16px;align-items:center;padding:16px}
+  aside, main{padding:16px}
+  aside{background:var(--panel);border:1px solid var(--line);border-radius:16px}
+  h2{margin:.2rem 0 .8rem}
+  .muted{color:var(--muted)}
+  .controls{display:grid;gap:10px}
+  .row{display:grid;grid-template-columns:1fr 120px;gap:8px;align-items:center}
+  input[type="range"]{width:100%}
+  button{
+    background:#0f1b3c;color:var(--ink);border:1px solid #223062;
+    border-radius:12px;padding:10px;cursor:pointer
+  }
+  button:hover{background:#12224a}
+  .card{background:#0c1430;border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:10px}
+  .big{font-size:1.4rem;font-weight:700}
+  canvas{width:100%;max-width:640px;aspect-ratio:1.2/1;display:block;margin:0 auto;background:#0a122b;border:1px solid var(--line);border-radius:16px}
+  .kv{display:grid;grid-template-columns:1fr auto;gap:6px}
+  /* Outcomes table */
+  table.outcomes{width:100%;border-collapse:separate;border-spacing:0 6px}
+  table.outcomes td{padding:6px 8px}
+  table.outcomes tr{background:#0b1636;border:1px solid var(--line)}
+  table.outcomes tr td:last-child{text-align:right;font-weight:700}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <!-- Agent A panel -->
+  <aside>
+    <h2>Agent A</h2>
+    <div class="muted">Independent Q-table.</div>
+    <div class="card">
+      <div class="kv"><span>Choice (last):</span><span id="aChoice">—</span></div>
+      <div class="kv"><span>Reward (last):</span><span id="aRw">0</span></div>
+      <div class="kv big"><span>Total Points:</span><span id="aScore">0</span></div>
+    </div>
+    <div class="card">
+      <div class="kv"><span>Max Q(Split):</span><span id="aQSplit">0</span></div>
+      <div class="kv"><span>Max Q(Steal):</span><span id="aQSteal">0</span></div>
+      <div class="kv"><span>ε-greedy pick:</span><span id="aPick">—</span></div>
+    </div>
+  </aside>
+
+  <!-- Middle canvas + global controls -->
+  <main>
+    <h2 style="text-align:center">Auto Split/Steal (Q-Learning · 2×3 Board)</h2>
+    <canvas id="board" width="640" height="480" aria-label="2×3 board"></canvas>
+    <div class="card">
+      <div class="controls">
+        <div class="row">
+          <label for="rps">Rounds per second: <span id="rpsVal">1</span></label>
+          <input id="rps" type="range" min="1" max="20" value="1" />
+        </div>
+        <div class="row">
+          <label for="eps">ε (exploration)</label>
+          <input id="eps" type="range" min="0" max="1" step="0.01" value="0.15" />
+        </div>
+        <div class="row">
+          <label for="alpha">α (learning rate)</label>
+          <input id="alpha" type="range" min="0.01" max="1" step="0.01" value="0.25" />
+        </div>
+        <div class="row">
+          <label for="gamma">γ (discount)</label>
+          <input id="gamma" type="range" min="0" max="0.99" step="0.01" value="0.80" />
+        </div>
+        <div class="row">
+          <button id="toggle">Pause</button>
+          <button id="step">Step</button>
+        </div>
+        <div class="row">
+          <button id="reset">Reset (scores + Q)</button>
+          <div class="muted" style="text-align:right"><span id="roundsLab">Rounds: 0</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="font-size:.95rem">
+      <b>Payoff</b>
+      <ul style="margin:8px 0 0 18px">
+        <li><b>Split + Split</b> → +0.5 each</li>
+        <li><b>Steal + Steal</b> → +0 each</li>
+        <li><b>Mismatch</b> → the <b>Steal</b> chooser gets +1</li>
+      </ul>
+    </div>
+
+    <!-- NEW: Outcomes table -->
+    <div class="card">
+      <b>Outcomes</b>
+      <table class="outcomes" aria-label="Outcome counts">
+        <tbody>
+          <tr>
+            <td>Agent A split — Agent B split:</td>
+            <td id="countSS">0</td>
+          </tr>
+          <tr>
+            <td>Agent A split — Agent B steal:</td>
+            <td id="countSStl">0</td>
+          </tr>
+          <tr>
+            <td>Agent A steal — Agent B split:</td>
+            <td id="countStlS">0</td>
+          </tr>
+          <tr>
+            <td>Agent A steal — Agent B steal:</td>
+            <td id="countStlStl">0</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- Agent B panel -->
+  <aside>
+    <h2>Agent B</h2>
+    <div class="muted">Independent Q-table.</div>
+    <div class="card">
+      <div class="kv"><span>Choice (last):</span><span id="bChoice">—</span></div>
+      <div class="kv"><span>Reward (last):</span><span id="bRw">0</span></div>
+      <div class="kv big"><span>Total Points:</span><span id="bScore">0</span></div>
+    </div>
+    <div class="card">
+      <div class="kv"><span>Max Q(Split):</span><span id="bQSplit">0</span></div>
+      <div class="kv"><span>Max Q(Steal):</span><span id="bQSteal">0</span></div>
+      <div class="kv"><span>ε-greedy pick:</span><span id="bPick">—</span></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ======= Game / Learning Config =======
+  const ACTIONS = ['split', 'steal'];
+  const STATES = ['start', 'opp_split', 'opp_steal'];
+
+  function payoff(a, b) {
+    if (a === 'split' && b === 'split') return [0.5, 0.5];
+    if (a === 'steal' && b === 'steal') return [0, 0];
+    if (a === 'steal' && b === 'split') return [1, 0];
+    if (a === 'split' && b === 'steal') return [0, 1];
+    return [0, 0];
+  }
+
+  class Agent {
+    constructor(name) {
+      this.name = name;
+      this.Q = {};
+      for (const s of STATES) this.Q[s] = { split: 0, steal: 0 };
+      this.state = 'start';
+      this.lastAction = null;
+      this.total = 0;
+      this.lastReward = 0;
+    }
+    policy(eps) {
+      if (Math.random() < eps) return (Math.random() < 0.5 ? 'split' : 'steal');
+      const q = this.Q[this.state];
+      if (q.split === q.steal) return (Math.random() < 0.5 ? 'split' : 'steal');
+      return q.split > q.steal ? 'split' : 'steal';
+    }
+    maxQ(state) {
+      const q = this.Q[state];
+      return Math.max(q.split, q.steal);
+    }
+    step(alpha, gamma, action, reward, nextState) {
+      const s = this.state;
+      const oldQ = this.Q[s][action];
+      const target = reward + gamma * this.maxQ(nextState);
+      this.Q[s][action] = oldQ + alpha * (target - oldQ);
+      this.state = nextState;
+      this.lastAction = action;
+      this.lastReward = reward;
+      this.total += reward;
+    }
+    reset() {
+      for (const s of STATES) this.Q[s] = { split: 0, steal: 0 };
+      this.state = 'start';
+      this.lastAction = null;
+      this.total = 0;
+      this.lastReward = 0;
+    }
+  }
+
+  const A = new Agent('A');
+  const B = new Agent('B');
+
+  // ======= UI Elements =======
+  const el = id => document.getElementById(id);
+  const aChoiceEl = el('aChoice'), bChoiceEl = el('bChoice');
+  const aScoreEl = el('aScore'), bScoreEl = el('bScore');
+  const aRwEl = el('aRw'), bRwEl = el('bRw');
+  const aQSplitEl = el('aQSplit'), aQStealEl = el('aQSteal');
+  const bQSplitEl = el('bQSplit'), bQStealEl = el('bQSteal');
+  const aPickEl = el('aPick'), bPickEl = el('bPick');
+  const roundsLab = el('roundsLab');
+  const rpsEl = el('rps'), rpsVal = el('rpsVal');
+  const epsEl = el('eps'), alphaEl = el('alpha'), gammaEl = el('gamma');
+  const toggleBtn = el('toggle'), stepBtn = el('step'), resetBtn = el('reset');
+
+  // NEW: Outcomes count elements
+  const countEls = {
+    SS: el('countSS'),       // A split, B split
+    SStl: el('countSStl'),   // A split, B steal
+    StlS: el('countStlS'),   // A steal, B split
+    StlStl: el('countStlStl')// A steal, B steal
+  };
+  const comboCounts = { SS:0, SStl:0, StlS:0, StlStl:0 };
+
+  function updateCountsUI(){
+    countEls.SS.textContent = comboCounts.SS;
+    countEls.SStl.textContent = comboCounts.SStl;
+    countEls.StlS.textContent = comboCounts.StlS;
+    countEls.StlStl.textContent = comboCounts.StlStl;
+  }
+
+  // ======= Board (2×3) =======
+  const cvs = el('board');
+  const ctx = cvs.getContext('2d');
+  const COLS = 2, ROWS = 3;
+
+  const POS = { split: 0, mid: 1, steal: ROWS - 1 };
+
+  let aRowPos = POS.mid, bRowPos = POS.mid;
+  let aRowTarget = POS.mid, bRowTarget = POS.mid;
+  let aZone = 0, bZone = 0;
+  let aZoneTarget = 0, bZoneTarget = 0;
+
+  function drawBoard() {
+    const w = cvs.width, h = cvs.height;
+    ctx.clearRect(0,0,w,h);
+
+    const cellW = w / COLS;
+    const cellH = h / ROWS;
+
+    // Grid
+    ctx.strokeStyle = '#1a2448';
+    ctx.lineWidth = 1;
+    for (let c=0;c<=COLS;c++){
+      const x = Math.round(c*cellW)+0.5;
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
+    }
+    for (let r=0;r<=ROWS;r++){
+      const y = Math.round(r*cellH)+0.5;
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+    }
+
+    // Row highlights
+    ctx.fillStyle = 'rgba(126,231,135,0.10)'; // Split zone
+    ctx.fillRect(0, 0, w, cellH);
+    ctx.fillStyle = 'rgba(159,179,255,0.06)'; // Middle
+    ctx.fillRect(0, cellH, w, cellH);
+    ctx.fillStyle = 'rgba(255,183,3,0.10)';  // Steal zone
+    ctx.fillRect(0, (ROWS-1)*cellH, w, cellH);
+
+    // Labels
+    ctx.fillStyle = '#9fb3ff';
+    ctx.font = '14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillText('Agent A', 10, 18);
+    ctx.fillText('Agent B', w/2 + 10, 18);
+    ctx.fillText('SPLIT', 10, cellH - 6);
+    ctx.fillText('START', 10, cellH*2 - 6);
+    ctx.fillText('STEAL', 10, h - 6);
+
+    // Draw agents
+    function drawAgent(colIndex, rowPos, zoneDepth, lastAction, colorTag) {
+      const cx = colIndex * cellW + cellW/2;
+      const rowTop = rowPos * cellH;
+      const centerY = rowTop + cellH/2;
+
+      const maxOffset = cellH*0.40;
+      let offset = zoneDepth * maxOffset;
+      if (lastAction === 'split') offset *= -1;
+      else if (lastAction === 'steal') offset *= 1;
+      else offset = 0;
+
+      const cy = centerY + offset;
+
+      const r = Math.min(cellW, cellH)*0.28;
+      // glow
+      ctx.beginPath();
+      ctx.arc(cx, cy, r+4, 0, Math.PI*2);
+      ctx.fillStyle = colorTag === 'A' ? 'rgba(126,231,135,0.25)' : 'rgba(255,209,102,0.25)';
+      ctx.fill();
+      // core
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI*2);
+      ctx.fillStyle = colorTag === 'A' ? '#7ee787' : '#ffd166';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#0b1020';
+      ctx.stroke();
+    }
+    drawAgent(0, aRowPos, aZone, A.lastAction, 'A');
+    drawAgent(1, bRowPos, bZone, B.lastAction, 'B');
+  }
+
+  // Animate
+  let lastTime = 0;
+  function animate(t) {
+    const dt = Math.min(32, t - lastTime);
+    lastTime = t;
+    const speed = 0.02 * (parseInt(rpsEl.value,10)*1.2 + 1);
+    const zoneSpeed = 0.03 * (parseInt(rpsEl.value,10) + 1);
+
+    aRowPos += (aRowTarget - aRowPos) * speed * (dt/16);
+    bRowPos += (bRowTarget - bRowPos) * speed * (dt/16);
+    aZone   += (aZoneTarget   - aZone)   * zoneSpeed * (dt/16);
+    bZone   += (bZoneTarget   - bZone)   * zoneSpeed * (dt/16);
+
+    if (Math.abs(aRowTarget - aRowPos) < 0.001) aRowPos = aRowTarget;
+    if (Math.abs(bRowTarget - bRowPos) < 0.001) bRowPos = bRowTarget;
+    if (Math.abs(aZoneTarget - aZone) < 0.001) aZone = aZoneTarget;
+    if (Math.abs(bZoneTarget - bZone) < 0.001) bZone = bZoneTarget;
+
+    drawBoard();
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // ======= Game Loop =======
+  let rounds = 0;
+  let running = true;
+  let timer = null;
+
+  function updateUI() {
+    aChoiceEl.textContent = A.lastAction ? A.lastAction.toUpperCase() : '—';
+    bChoiceEl.textContent = B.lastAction ? B.lastAction.toUpperCase() : '—';
+    aRwEl.textContent = A.lastReward.toFixed(2);
+    bRwEl.textContent = B.lastReward.toFixed(2);
+    aScoreEl.textContent = A.total.toFixed(2);
+    bScoreEl.textContent = B.total.toFixed(2);
+    aQSplitEl.textContent = A.Q[A.state]?.split.toFixed(3);
+    aQStealEl.textContent = A.Q[A.state]?.steal.toFixed(3);
+    bQSplitEl.textContent = B.Q[B.state]?.split.toFixed(3);
+    bQStealEl.textContent = B.Q[B.state]?.steal.toFixed(3);
+    roundsLab.textContent = `Rounds: ${rounds}`;
+    updateCountsUI();
+  }
+
+  function stepOnce() {
+    const eps = parseFloat(epsEl.value);
+    const alpha = parseFloat(alphaEl.value);
+    const gamma = parseFloat(gammaEl.value);
+
+    const aAct = A.policy(eps);
+    const bAct = B.policy(eps);
+
+    // animate toward chosen row and deepen into zone
+    aRowTarget = (aAct === 'split') ? POS.split : POS.steal;
+    bRowTarget = (bAct === 'split') ? POS.split : POS.steal;
+    aZoneTarget = 1;
+    bZoneTarget = 1;
+
+    // rewards
+    const [rA, rB] = payoff(aAct, bAct);
+
+    // NEW: count outcome combos
+    if (aAct === 'split' && bAct === 'split') comboCounts.SS++;
+    else if (aAct === 'split' && bAct === 'steal') comboCounts.SStl++;
+    else if (aAct === 'steal' && bAct === 'split') comboCounts.StlS++;
+    else if (aAct === 'steal' && bAct === 'steal') comboCounts.StlStl++;
+
+    // next state is opponent's current action
+    const nextStateA = bAct === 'split' ? 'opp_split' : 'opp_steal';
+    const nextStateB = aAct === 'split' ? 'opp_split' : 'opp_steal';
+
+    // Q updates
+    A.step(alpha, gamma, aAct, rA, nextStateA);
+    B.step(alpha, gamma, bAct, rB, nextStateB);
+
+    rounds++;
+    aPickEl.textContent = aAct.toUpperCase();
+    bPickEl.textContent = bAct.toUpperCase();
+    updateUI();
+
+    // retreat animation
+    const retreatDelay = Math.round(400 / Math.max(1, parseInt(rpsEl.value,10)));
+    setTimeout(() => {
+      aRowTarget = POS.mid; bRowTarget = POS.mid;
+      aZoneTarget = 0;      bZoneTarget = 0;
+    }, retreatDelay);
+  }
+
+  function setTimer() {
+    if (timer) clearInterval(timer);
+    const rps = Math.max(1, Math.min(20, parseInt(rpsEl.value,10)||1));
+    rpsVal.textContent = rps;
+    const interval = Math.round(1000 / rps);
+    if (running) timer = setInterval(stepOnce, interval);
+  }
+
+  // ======= Controls =======
+  toggleBtn.onclick = () => {
+    running = !running;
+    toggleBtn.textContent = running ? 'Pause' : 'Resume';
+    setTimer();
+  };
+  stepBtn.onclick = () => {
+    if (running) { running = false; toggleBtn.textContent = 'Resume'; clearInterval(timer); }
+    stepOnce();
+  };
+  resetBtn.onclick = () => {
+    A.reset(); B.reset();
+    rounds = 0;
+    // reset positions/animation
+    aRowPos = bRowPos = aRowTarget = bRowTarget = POS.mid;
+    aZone = bZone = aZoneTarget = bZoneTarget = 0;
+    // reset outcome counts
+    comboCounts.SS = comboCounts.SStl = comboCounts.StlS = comboCounts.StlStl = 0;
+    updateUI();
+  };
+  rpsEl.oninput = setTimer;
+
+  // Init
+  updateUI();
+  setTimer();
+})();
+</script>
+</body>
+</html>
